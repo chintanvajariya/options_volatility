@@ -3,8 +3,7 @@ name: Daily SPY Options Snapshot
 on:
   workflow_dispatch: {}          # manual trigger
   schedule:
-    - cron: "45 14 * * 1-5"      # 10:45 AM ET → 14:45 UTC, weekdays
-    # - cron: "15 20 * * 1-5"      # 3:15 PM ET → 20:15 UTC, optional pre-close snapshot
+    - cron: "45 14 * * 1-5"      # 10:45 AM ET, weekdays
 
 permissions:
   contents: write
@@ -35,7 +34,7 @@ jobs:
 
       - name: Run snapshot script
         run: |
-          python options_snapshot.py
+          python data/options_snapshot.py
 
       - name: Commit & push only if data changed
         run: |
@@ -45,6 +44,6 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add snapshots/
+          git add data/snapshots/
           git commit -m "SPY option snapshot $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
           git push origin main

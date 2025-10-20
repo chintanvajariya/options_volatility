@@ -1,9 +1,10 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timezone
 from scipy.interpolate import UnivariateSpline, Rbf
+import os
+from glob import glob
 
 '''
 We intend to create a 3D plot of the option's volatility surface.
@@ -20,55 +21,47 @@ max_implied_volatility = 3.0
 min_bid = 0.01
 min_open_interest = 5
 
-stock_data = yf.Ticker(ticker)
-spot = stock_data.fast_info["last_price"]  # Store current price
+snapshot_dir = "./data/snapshots"
+latest_file = max(glob(os.path.join(snapshot_dir, f"{ticker}_*.csv")), key=os.path.getmtime)
+print(f"Loading snapshot → {latest_file}")
+df = pd.read_csv(latest_file)
+spot = float(df["spot"].iloc[0])  # same as live version
+r, q = 0.05, 0.015
 
-# List available expiration dates
-expirations = []
-
-expirations = []
-for expiration in stock_data.options:
-    d = datetime.strptime(expiration, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    if (d - datetime.now(timezone.utc)).days > 0 and (d - datetime.now(timezone.utc)).days <= max_days:
-        expirations.append(expiration)
-
-def percentage_of_year(d):
+def percentage_of_year(exp):
+    d = datetime.strptime(str(exp), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     return max((d - datetime.now(timezone.utc)).days, 1) / 365.0
 
 datapoints = []
 
-for expiration in expirations:
-    chain = stock_data.option_chain(expiration)
-    d = datetime.strptime(expiration, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    T = percentage_of_year(d)
-    if T < 0.03:  # skip ultra-short expiries
+for expiration in df["expiration"].unique():
+    chain_df = df[df["expiration"] == expiration]
+
+    T = percentage_of_year(expiration)
+    if T < 0.03:
         continue
+    F = spot * np.exp((r - q) * T)
 
-    # --- forward adjustment for OTM selection ---
-    r, q = 0.05, 0.015  # simple annualized assumptions
-    F = spot * np.exp((r - q) * T)  # forward price
-
-    calls = chain.calls.copy()
-    puts  = chain.puts.copy()
+    calls = chain_df[chain_df["side"] == "C"].copy()
+    puts  = chain_df[chain_df["side"] == "P"].copy()
 
     # keep out-of-the-money sides
     calls = calls[(calls["strike"] > F * 1.00)]
     puts  = puts[(puts["strike"] < F * 1.00)]
 
-    df = pd.concat([calls.assign(side="C"), puts.assign(side="P")], ignore_index=True)
+    filtered = pd.concat([calls.assign(side="C"), puts.assign(side="P")], ignore_index=True)
 
     # --- liquidity filters ---
-    df = df[(df["bid"] >= min_bid) & (df["openInterest"] >= min_open_interest)]
-    df = df[np.isfinite(df["impliedVolatility"])]
-    df = df[(df["impliedVolatility"] > 0) & (df["impliedVolatility"] < max_implied_volatility)]
+    filtered = filtered[(filtered["bid"] >= min_bid) & (filtered["openInterest"] >= min_open_interest)]
+    filtered = filtered[np.isfinite(filtered["impliedVolatility"])]
+    filtered = filtered[(filtered["impliedVolatility"] > 0) & (filtered["impliedVolatility"] < max_implied_volatility)]
 
-    if df.empty:
+    if filtered.empty:
         continue
 
-    # transform axes to log-moneyness and time to expiry
-    strike = df["strike"].values.astype(float)
+    strike = filtered["strike"].values.astype(float)
     logMoneyness = np.log(strike / spot)
-    impliedVolatility = df["impliedVolatility"].values.astype(float)
+    impliedVolatility = filtered["impliedVolatility"].values.astype(float)
 
     try:
         spline = UnivariateSpline(logMoneyness, impliedVolatility, s=0.0005)
