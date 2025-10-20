@@ -35,7 +35,7 @@ jobs:
 
       - name: Run snapshot script
         run: |
-          python save_option_snapshot.py
+          python options_snapshot.py
 
       - name: Commit & push only if data changed
         run: |
