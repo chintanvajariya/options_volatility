@@ -2,7 +2,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
+from scipy.interpolate import UnivariateSpline, Rbf
 
 '''
 We intend to create a 3D plot of the option's volatility surface.
@@ -13,63 +14,99 @@ We intend to create a 3D plot of the option's volatility surface.
 we will have toggles to switch between calls and puts
 '''
 
-ticker = 'SPY'  # Other high-liquidity tickers include AAPL QQQ TSLA SPY
-date = 0  # Chosen index for expiration date
-rate = 0.0443  # Risk-free rate
+ticker = 'SPY'  # options include SPY, QQQ, AAPL, MSFT, GOOGL
+max_days = 365
+max_implied_volatility = 3.0
+min_bid = 0.01
+min_open_interest = 5
 
 stock_data = yf.Ticker(ticker)
-price = stock_data.history_metadata['regularMarketPrice']  # Store current price
-
+spot = stock_data.fast_info["last_price"]  # Store current price
 
 # List available expiration dates
-expirations = stock_data.options
+expirations = []
 
-first_expiration = expirations[0]
-first_exp_date = datetime.strptime(first_expiration, '%Y-%m-%d')
-cutoff_date = first_exp_date + timedelta(days=365)
+expirations = []
+for expiration in stock_data.options:
+    d = datetime.strptime(expiration, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if (d - datetime.now(timezone.utc)).days > 0 and (d - datetime.now(timezone.utc)).days <= max_days:
+        expirations.append(expiration)
 
-filtered_expirations = []
-for exp in expirations:
-    exp_date = datetime.strptime(exp, '%Y-%m-%d')
-    if exp_date <= cutoff_date:
-        filtered_expirations.append(exp)
+def percentage_of_year(d):
+    return max((d - datetime.now(timezone.utc)).days, 1) / 365.0
 
-expirations = filtered_expirations
-
-# Fetch the option chain for the chosen expiration date
-option_chain, calls, puts = [], [], []
+datapoints = []
 
 for expiration in expirations:
-    option_chain.append(stock_data.option_chain(expiration))
-    calls.append(option_chain[expirations.index(expiration)].calls)
-    puts.append(option_chain[expirations.index(expiration)].puts)
+    chain = stock_data.option_chain(expiration)
+    d = datetime.strptime(expiration, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    T = percentage_of_year(d)
 
+    # Only use calls when Strike >= Spot, puts when Strike <= Spot to avoid deep ITM noise
+    calls = chain.calls.copy()
+    puts = chain.puts.copy()
 
-# x axis is strikes
-strikes = []             # x axis
-expirations              # y axis
-implied_volatility = []  # z axis
+    calls = calls[(calls["strike"] >= spot)]
+    puts = puts[(puts["strike"] <= spot)]
 
-# Filter out extreme IVs (keep only IV <= 1.0)
-max_iv = 1.0
+    # combine and clean
+    df = pd.concat([calls.assign(side="C"), puts.assign(side="P")], ignore_index=True)
 
-for call in calls:
-    strikes.append(call['strike'])
+    # liquidity filters
+    df = df[(df["bid"] >= min_bid) & (df["openInterest"] >= min_open_interest)]
+    # prefer yfinance IV if present and valid
+    df = df[np.isfinite(df["impliedVolatility"])]
+    df = df[(df["impliedVolatility"] > 0) & (df["impliedVolatility"] < max_implied_volatility)]
 
-for call in calls:
-    implied_volatility.append(call['impliedVolatility'])
+    if df.empty:
+        continue
 
-# Apply IV filtering while maintaining data structure
-for i in range(len(implied_volatility)):
-    for j in range(len(implied_volatility[i])):
-        if implied_volatility[i][j] > max_iv:
-            implied_volatility[i][j] = np.nan
+    # transform axes to log-moneyness and time to expiry
+    strike = df["strike"].values.astype(float)
+    logMoneyness = np.log(strike / spot)
+    impliedVolatility = df["impliedVolatility"].values.astype(float)
 
-fig = go.Figure(data=[go.Surface(z=implied_volatility, x=strikes, y=expirations)])
+    try:
+        spline = UnivariateSpline(logMoneyness, impliedVolatility, s=0.0005)
+        grid_logMoneyness = np.linspace(logMoneyness.min(), logMoneyness.max(), 50)
+        grid_impliedVolatility = spline(grid_logMoneyness)
+    except Exception:
+        grid_logMoneyness, grid_impliedVolatility = logMoneyness, impliedVolatility
+
+    T_expirations = np.full_like(grid_impliedVolatility, T, dtype=float)
+
+    for x, y, z in zip(grid_logMoneyness, T_expirations, grid_impliedVolatility):
+        datapoints.append((x, y, z))
+
+points = np.array(datapoints)
+x_points, y_points, z_points = points[:,0], points[:,1], points[:,2]
+
+weights = (z_points ** 2) * y_points
+
+# define rectangular grid
+x_grid = np.linspace(np.percentile(x_points, 5), np.percentile(x_points, 95), 80)   # log-moneyness range
+y_grid = np.linspace(y_points.min(), y_points.max(), 40)                            # maturities in years
+X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
+
+# set an epsilon scaled to data spread and a small smoothing factor to flatten "fins"
+epsilon = 0.5 * np.sqrt(np.var(x_points) + np.var(y_points))
+rbf = Rbf(x_points, y_points, weights, function="multiquadric", epsilon=epsilon, smooth=0.001)
+Weights = rbf(X_grid, Y_grid)
+
+# compute implied vol back from total variance
+Z_points = np.sqrt(np.maximum(Weights / np.maximum(Y_grid, 1*10**-6), 0))
+Z_points = np.ma.masked_invalid(Z_points)
+
+# plot
+fig = go.Figure(data=[go.Surface(z=Z_points, x=X_grid, y=Y_grid, colorscale="Plasma")])
 fig.update_layout(
-    xaxis_title="Strikes",
-    yaxis_title="Expirations",
-    # zaxis_title="Implied Volatility"
+    title=f"{ticker} Implied Volatility Surface (OTM, log-moneyness vs years)",
+    scene=dict(
+        xaxis_title="log-moneyness ln(Strike/Spot)",
+        yaxis_title="Time to Expiry (years)",
+        zaxis_title="Implied Volatility"
+    ),
+    template="plotly_dark"
 )
 
 fig.show()
