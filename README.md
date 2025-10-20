@@ -1,4 +1,4 @@
-# Options Volatility Visualization
+# Options Volatility Surface Visualization
 
 ## Overview
 Options are financial derivatives that provide the right, but not the obligation, to buy (call option) or sell (put option) an underlying asset at a predetermined strike price before or at the expiration date. Option prices consist of two key components:
