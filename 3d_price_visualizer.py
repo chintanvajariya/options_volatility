@@ -14,7 +14,7 @@ We intend to create a 3D plot of the option's volatility surface.
 we will have toggles to switch between calls and puts
 '''
 
-ticker = 'SPY'  # options include SPY, QQQ, AAPL, MSFT, GOOGL
+ticker = 'SPY'  # options include TSLA, SPY, QQQ, AAPL, MSFT, GOOGL
 max_days = 365
 max_implied_volatility = 3.0
 min_bid = 0.01
@@ -41,20 +41,24 @@ for expiration in expirations:
     chain = stock_data.option_chain(expiration)
     d = datetime.strptime(expiration, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     T = percentage_of_year(d)
+    if T < 0.03:  # skip ultra-short expiries
+        continue
 
-    # Only use calls when Strike >= Spot, puts when Strike <= Spot to avoid deep ITM noise
+    # --- forward adjustment for OTM selection ---
+    r, q = 0.05, 0.015  # simple annualized assumptions
+    F = spot * np.exp((r - q) * T)  # forward price
+
     calls = chain.calls.copy()
-    puts = chain.puts.copy()
+    puts  = chain.puts.copy()
 
-    calls = calls[(calls["strike"] >= spot)]
-    puts = puts[(puts["strike"] <= spot)]
+    # keep out-of-the-money sides
+    calls = calls[(calls["strike"] > F * 1.00)]
+    puts  = puts[(puts["strike"] < F * 1.00)]
 
-    # combine and clean
     df = pd.concat([calls.assign(side="C"), puts.assign(side="P")], ignore_index=True)
 
-    # liquidity filters
+    # --- liquidity filters ---
     df = df[(df["bid"] >= min_bid) & (df["openInterest"] >= min_open_interest)]
-    # prefer yfinance IV if present and valid
     df = df[np.isfinite(df["impliedVolatility"])]
     df = df[(df["impliedVolatility"] > 0) & (df["impliedVolatility"] < max_implied_volatility)]
 
@@ -90,7 +94,7 @@ X_grid, Y_grid = np.meshgrid(x_grid, y_grid)
 
 # set an epsilon scaled to data spread and a small smoothing factor to flatten "fins"
 epsilon = 0.5 * np.sqrt(np.var(x_points) + np.var(y_points))
-rbf = Rbf(x_points, y_points, weights, function="multiquadric", epsilon=epsilon, smooth=0.001)
+rbf = Rbf(x_points, y_points, weights, function="multiquadric", epsilon=epsilon, smooth=0.0006)
 Weights = rbf(X_grid, Y_grid)
 
 # compute implied vol back from total variance
@@ -108,5 +112,16 @@ fig.update_layout(
     ),
     template="plotly_dark"
 )
+
+W_pred = rbf(x_points, y_points)
+Z_pred = np.sqrt(np.maximum(W_pred / np.maximum(y_points, 1e-6), 0))
+
+mae = np.average(np.abs(Z_pred - z_points))
+print("Weighted MAE to quotes:", mae)
+
+print("Total points:", len(x_points))
+print("neg count (k<0):", np.sum(x_points < 0))
+print("pos count (k>0):", np.sum(x_points > 0))
+print("ATM band count (|k|<=0.02):", np.sum(np.abs(x_points) <= 0.02))
 
 fig.show()
