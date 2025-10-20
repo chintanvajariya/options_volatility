@@ -35,7 +35,7 @@ def save_option_snapshot(ticker=TICKER):
             calls = chain.calls.copy()
             puts = chain.puts.copy()
 
-            # Add uniform columns used by our visualizer
+            # add uniform columns used by our visualizer
             for df, side in [(calls, "C"), (puts, "P")]:
                 df["side"] = side
                 df["expiration"] = expiration
@@ -52,7 +52,7 @@ def save_option_snapshot(ticker=TICKER):
 
     df = pd.concat(all_data, ignore_index=True)
 
-    # Keep only columns required by visualizer
+    # keep only columns required by visualizer
     keep_cols = [
         "side",
         "expiration",
@@ -65,7 +65,7 @@ def save_option_snapshot(ticker=TICKER):
     ]
     df = df[[c for c in keep_cols if c in df.columns]]
 
-    # Clean & normalize
+    # clean & normalize
     df = df.dropna(subset=["strike", "impliedVolatility"])
     df["strike"] = df["strike"].astype(float)
     df["bid"] = df["bid"].fillna(0).astype(float)
@@ -73,11 +73,10 @@ def save_option_snapshot(ticker=TICKER):
     df["impliedVolatility"] = df["impliedVolatility"].astype(float)
     df["spot"] = float(spot)
 
-    # Save snapshot
+    # save snapshot
     fname = f"{SNAPSHOT_DIR}/{ticker}_{timestamp}.csv"
     df.to_csv(fname, index=False)
 
-# ---------- MAIN ----------
 if __name__ == "__main__":
-    print(f"Starting snapshot for {TICKER} at {datetime.now(pytz.timezone("US/Eastern")).strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Starting snapshot for {TICKER} at {datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     save_option_snapshot()
